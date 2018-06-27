@@ -32,7 +32,12 @@ bool antialias = false;
 
 mapping chunk_cache = ([ ]);
 
+string exec_path;
+string world_path;
+
 int main(int argc, array argv) {
+	exec_path = argv[0];
+
 	antialias = Getopt.find_option(argv, "a", "antialias");
 
 	int width = (int)Getopt.find_option(argv, "w", "width", UNDEFINED, "640");
@@ -44,6 +49,13 @@ int main(int argc, array argv) {
 	float cam_init_yaw = (float)Getopt.find_option(argv, "", "yaw", UNDEFINED, "0.0");
 	float cam_init_pitch = (float)Getopt.find_option(argv, "", "pitch", UNDEFINED, "0.0");
 	float cam_init_fov = (float)Getopt.find_option(argv, "f", "fov", UNDEFINED, "75.0");
+
+	int multiproc = (int)Getopt.find_option(argv, "m", "", UNDEFINED, "1");
+	int is_renderer = Getopt.find_option(argv, "", "renderer");
+
+	if (multiproc < 1) {
+		multiproc = 1;
+	}
 
 	argv = Getopt.get_args(argv);
 	argc = sizeof(argv);
@@ -61,11 +73,14 @@ int main(int argc, array argv) {
 		werror("--yaw=N           Sets the yaw rotation of the camera.\n");
 		werror("--pitch=N         Sets the pitch rotation of the camera.\n");
 		werror("-f|--fov=N        Sets the FOV of the camera (default: 75.0).\n");
+		werror("-m=N              Enables multi-processing with N worker processes.\n");
 		werror("\n");
 
 		werror("If an \"export\" folder exists, the rendered frames will be saved to it.\n");
 		return 1;
 	}
+
+	world_path = argv[1];
 
 	for (int i = 1; i < 256; i++) {
 		if (!colors[i]) {
@@ -79,64 +94,215 @@ int main(int argc, array argv) {
 	// Load colors
 	load_colors();
 
-	// Initialize SDL
-	SDL.init(SDL.INIT_VIDEO);
-	SDL.set_caption("Raycraft", "");
-	screen = SDL.set_video_mode(width, height, 32, SDL.HWSURFACE | SDL.DOUBLEBUF | SDL.HWACCEL | SDL.RLEACCEL);
+	if (is_renderer) {
+		werror("[Renderer] Process started\n");
 
-	// Initialize camera
-	CCamera cam = CCamera(cam_init_x, cam_init_y, cam_init_z, cam_init_yaw, cam_init_pitch);
-	cam->fov = cam_init_fov;
+		void send(mapping m) {
+			write(Standards.JSON.encode(m, Standards.JSON.ASCII_ONLY) + "\n");
+		};
 
-	Thread.Mutex mtx = Thread.Mutex();
+		void cmd(string d) {
+			mapping m = Standards.JSON.decode(d);
 
-	int frame = 0;
+			if (m->cmd == "render") {
+				werror("[Renderer] Rendering tile (%d, %d)...\n", m->x, m->y);
 
-	void update() {
-		Image.Image img = Image.Image(width, height, 0, 0, 0);
+				CCamera cam = CCamera(m->camera->x, m->camera->y, m->camera->z, m->camera->yaw, m->camera->pitch);
+				cam->fov = m->camera->fov;
 
-		// Move camera
-		//cam->position->y += 1.0;
-		//cam->yaw += 4.0;
+				Image.Image tile = cam->render_tile(m->x, m->y, m->w, m->h, m->blksize, m->antialias);
 
-		cam->start_render_async(
-			width,
-			height,
-			BLOCKSIZE,
-			lambda(Image.Image tile, int x, int y, int status, int tiles_total, int tiles_finished) {
-				img->paste(tile, x * BLOCKSIZE, y * BLOCKSIZE);
+				send(([
+					"cmd": "render_result",
+					"x": m->x,
+					"y": m->y,
+					"image": Image.PNG.encode(tile),
+				]));
+			}
+		};
+
+		send(([ "cmd": "init" ]));
+
+		string buf = "";
+
+		while (true) {
+			string d = Stdio.stdin->read(1024, 1);
+			if (!d || d == "") {
+				exit(0);
+			}
+
+			for (int i = 0; i < sizeof(d); i++) {
+				if (d[i] == '\n') {
+					cmd(buf);
+					buf = "";
+				}
+				else {
+					buf += d[i..i];
+				}
+			}
+		}
+	}
+	else {
+		// Initialize SDL
+		SDL.init(SDL.INIT_VIDEO);
+		SDL.set_caption("Raycraft", "");
+		screen = SDL.set_video_mode(width, height, 32, SDL.HWSURFACE | SDL.DOUBLEBUF | SDL.HWACCEL | SDL.RLEACCEL);
+
+		// Initialize camera
+		CCamera cam = CCamera(cam_init_x, cam_init_y, cam_init_z, cam_init_yaw, cam_init_pitch);
+		cam->fov = cam_init_fov;
+
+		Thread.Mutex mtx = Thread.Mutex();
+
+		function render;
+
+		if (multiproc > 1) {
+			// Multi-processing renderer
+			render = lambda(int width, int height, bool antialias, function cb_tile_start, function cb_tile_done) {
+				Thread.Queue queue = Thread.Queue();
+
+				int tiles_x = (width / BLOCKSIZE) + !!(width % BLOCKSIZE);
+				int tiles_y = (height / BLOCKSIZE) + !!(height % BLOCKSIZE);
+
+				int tiles = tiles_x * tiles_y;
+				int tiles_done = 0;
+
+				for (int y = 0; y < tiles_y; y++) {
+					for (int x = 0; x < tiles_x; x++) {
+						queue->write(({ cam, x, y, width, height, BLOCKSIZE, antialias }));
+					}
+				}
+
+				Thread.Mutex _mtx = Thread.Mutex();
+				object k = _mtx->lock();
+
+				// Local callbacks
+				void _cb_tile_start(Worker worker, int x, int y) {
+					cb_tile_start(x, y);
+				};
+
+				void _cb_tile_done(Worker worker, int x, int y, Image.Image tile) {
+					cb_tile_done(x, y, tile);
+
+					if (++tiles_done == tiles) {
+						write("Rendering completed - Releasing lock...\n");
+						destruct(k);
+					}
+				};
+
+				// Start renderers
+				write("Starting %d workers...\n", multiproc);
+				array workers = ({ });
+
+				for (int i = 0; i < multiproc; i++) {
+					workers += ({ Worker(i, queue, _cb_tile_start, _cb_tile_done) });
+
+					// This will kill the worker when reached
+					queue->write(0);
+				}
+
+				// Lock on self - This will release when all tiles have finished rendering
+				_mtx->lock(1);
+			};
+		}
+		else {
+			// Single process renderer
+			render = lambda(int width, int height, bool antialias, function cb_tile_start, function cb_tile_done) {
+				int tiles_x = (width / BLOCKSIZE) + !!(width % BLOCKSIZE);
+				int tiles_y = (height / BLOCKSIZE) + !!(height % BLOCKSIZE);
+
+				int tiles = tiles_x * tiles_y;
+
+				array a = ({ });
+				for (int y = 0; y < tiles_y; y++) {
+					for (int x = 0; x < tiles_x; x++) {
+						a += ({ ({ x, y, width, height, BLOCKSIZE, antialias }) });
+					}
+				}
+
+				foreach (a, array b) {
+					int x = b[0];
+					int y = b[1];
+
+					cb_tile_start(x, y);
+
+					Image.Image tile = cam->render_tile(@b);
+
+					cb_tile_done(x, y, tile);
+				}
+			};
+		}
+
+		Thread.Thread(
+			lambda() {
+				Image.Image img = Image.Image(width, height, 0, 0, 0);
+				Image.Image img_preview = Image.Image(width / 8, height / 8, 0, 0, 0);
+
+				// Render preview
+				render(
+					width / 8,
+					height / 8,
+					false,
+					lambda(int x, int y) {
+						img_preview->box(x * BLOCKSIZE, y * BLOCKSIZE, (x + 1) * BLOCKSIZE - 1, (y + 1) * BLOCKSIZE - 1, 255, 0, 0);
+						img->paste(img_preview->scale(width, height), 0, 0);
+
+						object k = mtx->lock(1);
+						SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
+						destruct(k);
+					},
+					lambda(int x, int y, Image.Image tile) {
+						img_preview->paste(tile, x * BLOCKSIZE, y * BLOCKSIZE);
+						img->paste(img_preview->scale(width, height), 0, 0);
+
+						object k = mtx->lock(1);
+						SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
+						destruct(k);
+					}
+				);
+
+				// Darken preview
+				img->paste((img_preview * 0.5)->scale(width, height), 0, 0);
 
 				object k = mtx->lock(1);
 				SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
 				destruct(k);
 
-				if (tiles_total == tiles_finished) {
-					if (Stdio.is_dir("export")) {
-						Stdio.write_file("export/frame" + sprintf("%05d", ++frame) + ".png", Image.PNG.encode(img));
+				// Start main render
+				render(
+					width,
+					height,
+					antialias,
+					lambda(int x, int y) {
+						// todo
+					},
+					lambda(int x, int y, Image.Image tile) {
+						img->paste(tile, x * BLOCKSIZE, y * BLOCKSIZE);
+
+						object k = mtx->lock(1);
+						SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
+						destruct(k);
 					}
-					//SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen, UNDEFINED, SDL.Rect(width, 0, width, height));
-					//update();
-				}
-			});
-	};
+				);
+			}
+		);
 
-	update();
+		SDL.Event e = SDL.Event();
+		while (true) {
+			while (e->get()) {
+				if (e->type == SDL.QUIT) return 0;
+			}
 
-	SDL.Event e = SDL.Event();
-	while (true) {
-		while (e->get()) {
-			if (e->type == SDL.QUIT) return 0;
+			object k = mtx->lock(1);
+			SDL.flip();
+			destruct(k);
+
+			Pike.DefaultBackend(0.0);
+			sleep(0.1);
 		}
 
-		object k = mtx->lock(1);
-		SDL.flip();
-		destruct(k);
-
-		Pike.DefaultBackend(0.0);
-		sleep(0.1);
+		return 0;
 	}
-
-	return 0;
 }
 
 // Load average colors for blocks.lst and blocks.png
@@ -183,106 +349,14 @@ class CCamera {
 		this->pitch = pitch;
 	}
 
-	Image.Image render(int width, int height) {
-		Image.Image img = Image.Image(width, height, 0, 0, 0);
-		float fv = fov  * 0.0174532925;
-		float spx = 0.2 / (float)width;
-		float spy = 0.2 / (float)height;
-
-		for (int y = 0; y < height; y++){
-			write("\rRendering... %.1f%%", ((float)(y + 1.0) / (float)height) * 100.0);
-
-			for (int x = 0; x < width; x++) {
-				float ry = ((float)y / (float)height) - 0.5;
-				float rx = ((float)x / (float)width) - 0.5;
-
-				float fx = rx * fv;
-				float fy = ry * fv;
-
-				if (antialias) {
-					CColor c1 = raytrace(rx, ry, (rx - 0.5 - spx) * fv, (ry - 0.5) * fv) || black;
-					CColor c2 = raytrace(rx, ry, (rx - 0.5 + spx) * fv, (ry - 0.5) * fv) || black;
-					CColor c3 = raytrace(rx, ry, (rx - 0.5) * fv, (ry - 0.5 - spy) * fv) || black;
-					CColor c4 = raytrace(rx, ry, (rx - 0.5) * fv, (ry - 0.5 + spy) * fv) || black;
-
-					float r = (c1->r + c2->r + c3->r + c4->r) / 4.0;
-					float g = (c1->g + c2->g + c3->g + c4->g) / 4.0;
-					float b = (c1->b + c2->b + c3->b + c4->b) / 4.0;
-
-					img->setpixel(x, y, (int)(r * 255), (int)(g * 255), (int)(b * 255));
-				}
-				else {
-					CColor c = raytrace(rx, ry, fx, fy);
-					if (!c) c = CColor(0.0, 0.0, 0.0);
-
-					img->setpixel(x, y, (int)(c->r * 255), (int)(c->g * 255), (int)(c->b * 255));
-				}
-			}
-		}
-
-		write("\rRendering... 100.0%\n");
-		return img;
-	}
-
-	void start_render_async(int width, int height, int blocksize, function cb) {
-		Thread.Farm pool = Thread.Farm();
-		pool->set_max_num_threads(4);
-
-		Thread.Mutex mtx = Thread.Mutex();
-
-		int tiles_x = (width / blocksize) + !!(width % blocksize);
-		int tiles_y = (height / blocksize) + !!(height % blocksize);
-
-		int tiles = tiles_x * tiles_y;
-		int tiles_orig = tiles;
-
-		void cb_tile(Image.Image img, int _x, int _y, int status) {
-			object k = mtx->lock(1);
-			if (status == 1) tiles--;
-			cb(img, _x, _y, status, tiles_orig, tiles_orig - tiles);
-			destruct(k);
-		};
-
-		array a = ({ });
-		for (int y = 0; y < tiles_y; y++) {
-			for (int x = 0; x < tiles_x; x++) {
-				a += ({ ({ _render_tile, x, y, width, height, blocksize, cb_tile }) });
-			}
-		}
-
-		Array.shuffle(a);
-		foreach (a, array b) {
-			pool->run_async(@b);
-		}
-	}
-
-	private void _render_tile(int tilex, int tiley, int width, int height, int blocksize, function cb) {
+	Image.Image render_tile(int tilex, int tiley, int width, int height, int blocksize, bool antialias) {
 		mixed err = catch {
 			int tilew = tilex * blocksize + blocksize > width ? width % blocksize : blocksize;
 			int tileh = tiley * blocksize + blocksize > height ? height % blocksize : blocksize;
 
 			Image.Image img = Image.Image(tilew, tileh, 0, 0, 0);
 
-			// Top-left corner
-			img->line(0, 0, 5, 0, 255, 0, 0);
-			img->line(0, 0, 0, 5, 255, 0, 0);
-
-			// Top-right corner
-			img->line(tilew - 1, 0, tilew - 6, 0, 255, 0, 0);
-			img->line(tilew - 1, 0, tilew - 1, 5, 255, 0, 0);
-
-			// Bottom-left corner
-			img->line(0, tileh - 1, 5, tileh - 1, 255, 0, 0);
-			img->line(0, tileh - 1, 0, tileh - 6, 255, 0, 0);
-
-			// Bottom-right corner
-			img->line(tilew - 1, tileh - 1, tilew - 6, tileh - 1, 255, 0, 0);
-			img->line(tilew - 1, tileh - 1, tilew - 1, tileh - 6, 255, 0, 0);
-
-			cb(img->clone(), tilex, tiley, 0);
-			img = img->clear(0, 0, 0);
-
-			float fv = fov  * 0.0174532925;
+			float fv = fov * 0.0174532925;
 			int ix, y, x;
 
 			float ry, rx, fx, fy;
@@ -290,7 +364,7 @@ class CCamera {
 			CColor c;
 
 			if (antialias) {
-				// Anti-aliased, get colors from 10 points
+				// Anti-aliased, get colors from multiple points
 
 				for (int iy = 0; iy < tileh; iy++) {
 					y = iy + (tiley * blocksize);
@@ -300,13 +374,13 @@ class CCamera {
 
 						array ca = ({ });
 
-						for (float ify = -0.2; ify <= 0.2; ify += 0.05) {
-							for (float ifx = -0.2; ifx <= 0.2; ifx += 0.05) {
+						for (float ify = -0.2; ify <= 0.2; ify += 0.1) {
+							ry = ((y + ify) / (float)height) - 0.5;
+							fy = ry * fv;
+
+							for (float ifx = -0.2; ifx <= 0.2; ifx += 0.1) {
 								rx = ((x + ifx) / (float)width) - 0.5;
 								fx = rx * fv;
-
-								ry = ((y + ify) / (float)height) - 0.5;
-								fy = ry * fv;
 
 								ca += ({ raytrace(rx, ry, fx, fy) || black });
 							}
@@ -344,7 +418,7 @@ class CCamera {
 				}
 			}
 
-			cb(img, tilex, tiley, 1);
+			return img;
 		};
 
 		if (err) {
@@ -357,7 +431,7 @@ class CCamera {
 		int kx = 0;
 		int ky = 0;
 		int kz = 0;
-		CColor kc;
+		CColor kc = black;
 
 		float fx, fy, fz;	// Absolute coordinates
 		int ax, ay, az;	// Absolute block coordinates
@@ -395,7 +469,6 @@ class CCamera {
 			cy = ay >> 7;
 			cz = az >> 4;
 
-			kc = UNDEFINED;
 			if (!cy) {
 				MCChunk chunk = chunk_cache[cx + "," + cz];
 				if (!chunk) {
@@ -415,12 +488,6 @@ class CCamera {
 						float byf = fy % 1.0;
 						float bzf = fz % 1.0;
 
-						/*
-						if (byf > 0.99 && ((bxf < 0.01 || bxf > 0.99) || (bzf < 0.01 || bzf > 0.99))) {
-							return CColor(0.0, 0.0, 0.0);
-						}
-						*/
-
 						if (textures[b]) {
 							if (bxf <= 0.001 || bxf >= 0.999) {
 								u = bzf;
@@ -438,15 +505,17 @@ class CCamera {
 							array tc = textures[b]->getpixel((int)(u * 16), (int)(v * 16));
 
 							if (u <= 0.01 || u >= 0.99 || v <= 0.01 || v >= 0.99) {
-								return CColor(tc[0] / 512.0, tc[1] / 512.0, tc[2] / 512.0);
+								kc = CColor(tc[0] / 512.0, tc[1] / 512.0, tc[2] / 512.0);
 							}
 							else {
-								return CColor(tc[0] / 255.0, tc[1] / 255.0, tc[2] / 255.0);
+								kc = CColor(tc[0] / 255.0, tc[1] / 255.0, tc[2] / 255.0);
 							}
 						}
 						else {
-							return colors[b];
+							kc = colors[b];
 						}
+
+						break;
 					}
 				}
 			}
@@ -460,6 +529,8 @@ class CCamera {
 
 			n += nv;
 		}
+
+		return CColor(linear(kc->r, 0.8, n / 4096.0), linear(kc->g, 0.941, n / 4096.0), linear(kc->b, 1.0, n / 4096.0));
 	}
 }
 
@@ -480,5 +551,122 @@ class CVector {
 		x = _x;
 		y = _y;
 		z = _z;
+	}
+}
+
+float linear(float v0, float v1, float t) {
+	return (1 - t) * v0 + t * v1;
+}
+
+class Worker {
+	int id;
+	Thread.Queue queue;
+
+	function cb_start;
+	function cb_done;
+
+	object proc;
+
+	Stdio.File f_stdin = Stdio.File();
+	Stdio.File f_stdout = Stdio.File();
+
+	Stdio.File p_stdin;
+	Stdio.File p_stdout;
+
+	bool is_running = true;
+
+	// Worker(i, queue, _cb_tile_start, _cb_tile_done)
+	void create(int id, Thread.Queue queue, function cb_start, function cb_done) {
+		this->id = id;
+		this->queue = queue;
+		this->cb_start = cb_start;
+		this->cb_done = cb_done;
+
+		p_stdin = f_stdin->pipe(Stdio.PROP_BUFFERED | Stdio.PROP_REVERSE);
+		p_stdout = f_stdout->pipe(Stdio.PROP_BUFFERED);
+
+		array args = ({ "pike", exec_path, "--renderer", world_path });
+		mapping opts = ([
+			"stdin": p_stdin,
+			"stdout": p_stdout,
+		]);
+
+		proc = Process.create_process(args, opts);
+
+		Thread.Thread(run);
+	}
+
+	void run() {
+		string buf = "";
+
+		while (is_running) {
+			string d = f_stdout->read(1024, 1);
+			for (int i = 0; i < sizeof(d); i++) {
+				if (d[i] == '\n') {
+					cmd(buf);
+					buf = "";
+
+					if (!is_running) {
+						return;
+					}
+				}
+				else {
+					buf += d[i..i];
+				}
+			}
+		}
+	}
+
+	private void cmd(string d) {
+		mapping m = Standards.JSON.decode(d);
+
+		if (m->cmd == "init") {
+			next_tile();
+		}
+		else if (m->cmd == "render_result") {
+			cb_done(this, m->x, m->y, Image.PNG.decode(m->image));
+			next_tile();
+		}
+	}
+
+	private void next_tile() {
+		array a = queue->read();
+		if (!a) {
+			proc->kill(15);
+			is_running = false;
+			return;
+		}
+
+		CCamera cam = a[0];
+		int x = a[1];
+		int y = a[2];
+		int w = a[3];
+		int h = a[4];
+		int blksize = a[5];
+		int antialias = a[6];
+
+		cb_start(this, a[1], a[2]);
+
+		send(([
+			"cmd": "render",
+			"camera": ([
+				"x": cam->position->x,
+				"y": cam->position->y,
+				"z": cam->position->z,
+				"yaw": cam->yaw,
+				"pitch": cam->pitch,
+				"fov": cam->fov,
+			]),
+			"x": x,
+			"y": y,
+			"w": w,
+			"h": h,
+			"blksize": blksize,
+			"antialias": antialias,
+		]));
+	}
+
+	private void send(mapping m) {
+		f_stdin->write(Standards.JSON.encode(m, Standards.JSON.ASCII_ONLY) + "\n");
 	}
 }
