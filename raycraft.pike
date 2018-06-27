@@ -113,7 +113,7 @@ int main(int argc, array argv) {
 						Stdio.write_file("export/frame" + sprintf("%05d", ++frame) + ".png", Image.PNG.encode(img));
 					}
 					//SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen, UNDEFINED, SDL.Rect(width, 0, width, height));
-					update();
+					//update();
 				}
 			});
 	};
@@ -139,9 +139,9 @@ int main(int argc, array argv) {
 
 // Load average colors for blocks.lst and blocks.png
 void load_colors() {
-	Image.Image img = Image.PNG.decode(Stdio.read_file("blocks.png"));
+	Image.Image img = Image.PNG.decode(Stdio.read_file("data/blocks.png"));
 
-	array a = Stdio.read_file("blocks.lst") / "\n";
+	array a = Stdio.read_file("data/blocks.lst") / "\n";
 	foreach (a, string b) {
 		if (glob("*,*,*", b)) {
 			array c = array_sscanf(b, "%d,%d,%d");
@@ -219,7 +219,7 @@ class CCamera {
 
 	void start_render_async(int width, int height, int blocksize, function cb) {
 		Thread.Farm pool = Thread.Farm();
-		pool->set_max_num_threads(10);
+		pool->set_max_num_threads(4);
 
 		Thread.Mutex mtx = Thread.Mutex();
 
@@ -283,27 +283,33 @@ class CCamera {
 			float ry, rx, fx, fy;
 			float r, g, b;
 			CColor c, c1, c2, c3, c4;
-			CColor c_black = CColor(0.0, 0.0, 0.0);
 
-			for (int iy = 0; iy < tileh; iy++){
-				y = iy + (tiley * blocksize);
+			if (antialias) {
+				// Anti-aliased, get colors from 5 points
 
-				for (ix = 0; ix < tilew; ix++) {
-					x = ix + (tilex * blocksize);
+				for (int iy = 0; iy < tileh; iy++){
+					y = iy + (tiley * blocksize);
 
-					ry = ((float)y / (float)height) - 0.5;
-					rx = ((float)x / (float)width) - 0.5;
+					for (ix = 0; ix < tilew; ix++) {
+						x = ix + (tilex * blocksize);
 
-					fx = rx * fv;
-					fy = ry * fv;
+						ry = ((float)y / (float)height) - 0.5;
+						rx = ((float)x / (float)width) - 0.5;
 
-					if (antialias) {
-						// Anti-aliased, get colors from 5 points
-						c = raytrace(rx, ry, fx, fy) || c_black;
+						fx = rx * fv;
+						fy = ry * fv;
+
+						c = raytrace(rx, ry, fx, fy) || black;
+						/*
 						c1 = raytrace(rx, ry, (rx - 0.5 - spx) * fv, (ry - 0.5) * fv) || black;
 						c2 = raytrace(rx, ry, (rx - 0.5 + spx) * fv, (ry - 0.5) * fv) || black;
 						c3 = raytrace(rx, ry, (rx - 0.5) * fv, (ry - 0.5 - spy) * fv) || black;
 						c4 = raytrace(rx, ry, (rx - 0.5) * fv, (ry - 0.5 + spy) * fv) || black;
+						*/
+						c1 = raytrace(rx, ry, (rx - spx) * fv, fy) || black;
+						c2 = raytrace(rx, ry, (rx + spx) * fv, fy) || black;
+						c3 = raytrace(rx, ry, fx, (ry - spy) * fv) || black;
+						c4 = raytrace(rx, ry, fx, (ry + spy) * fv) || black;
 
 						r = (c->r + c1->r + c2->r + c3->r + c4->r) / 5.0;
 						g = (c->g + c1->g + c2->g + c3->g + c4->g) / 5.0;
@@ -311,9 +317,24 @@ class CCamera {
 
 						img->setpixel(ix, iy, (int)(r * 255), (int)(g * 255), (int)(b * 255));
 					}
-					else {
-						// Aliased, get color from 1 point
-						c = raytrace(rx, ry, fx, fy) || c_black;
+				}
+			}
+			else {
+				// Aliased, get color from 1 point
+
+				for (int iy = 0; iy < tileh; iy++){
+					y = iy + (tiley * blocksize);
+
+					for (ix = 0; ix < tilew; ix++) {
+						x = ix + (tilex * blocksize);
+
+						ry = ((float)y / (float)height) - 0.5;
+						rx = ((float)x / (float)width) - 0.5;
+
+						fx = rx * fv;
+						fy = ry * fv;
+
+						c = raytrace(rx, ry, fx, fy) || black;
 
 						img->setpixel(ix, iy, (int)(c->r * 255), (int)(c->g * 255), (int)(c->b * 255));
 					}
@@ -335,23 +356,33 @@ class CCamera {
 		int kz = 0;
 		CColor kc;
 
-		int ax, ay, az;
-		int bx, by, bz;
-		int cx, cy, cz;
+		float fx, fy, fz;	// Absolute coordinates
+		int ax, ay, az;	// Absolute block coordinates
+		int bx, by, bz;	// Block coordinates within chunk (16x128x16)
+		int cx, cy, cz;	// Chunk coordinates within world
 
 		int b;
 
+		float _yaw = yaw * 0.0174532925 + ryaw;
+		float _pitch = pitch * 0.0174532925 - rpitch;
+
+		Math.Matrix v_center = Math.Matrix(({ 0.5, 0.5, 0.5 }));
+
+		Math.Matrix v_axis_top = Math.Matrix(({ 0.0, 1.0, 0.0 }));
+		Math.Matrix v_axis_front = Math.Matrix(({ 1.0, 0.0, 0.0 }));
+		Math.Matrix v_axis_side = Math.Matrix(({ 0.0, 0.0, 1.0 }));
+
 		float n = 0.0;
-		while (n < 4096.0) {
-			n += 0.1;
+		while (n < 1024.0) {
+			//n += 0.1;
 
-			ax = (int)(position->x + cos(yaw * 0.0174532925 + ryaw) * n);
-			ay = (int)(position->y + sin(pitch * 0.0174532925 - rpitch) * n);
-			az = (int)(position->z + sin(yaw * 0.0174532925 + ryaw) * n);
+			fx = position->x + cos(_yaw) * n;
+			fy = position->y + sin(_pitch) * n;
+			fz = position->z + sin(_yaw) * n;
 
-			if (kc && ax == kx && ay == ky && az == kz) {
-				return kc;
-			}
+			ax = (int)fx;
+			ay = (int)fy;
+			az = (int)fz;
 
 			bx = ax & 15;
 			by = ay & 127;
@@ -377,10 +408,66 @@ class CCamera {
 						ky = ay;
 						kz = az;
 
-						return kc = colors[b];
+						kc = colors[b];
+
+						float bxf = fx % 1.0;
+						float byf = fy % 1.0;
+						float bzf = fz % 1.0;
+
+						if (byf > 0.99 && ((bxf < 0.01 || bxf > 0.99) || (bzf < 0.01 || bzf > 0.99))) {
+							return CColor(0.0, 0.0, 0.0);
+						}
+
+						if (b == 1) {
+							Math.Matrix v_hit = Math.Matrix(({ bxf, byf, bzf }));
+							Math.Matrix v_normal = v_hit->sub(v_center)->normv();
+
+							float a_top = (float)v_axis_top->dot_product(v_normal);
+
+							if (a_top >= 0.5) {
+								return CColor(1.0, 0.0, 0.0);
+							}
+							else if (a_top <= -0.7071) {
+								return CColor(0.5, 0.0, 0.0);
+							}
+							else {
+								float a_front = (float)v_axis_front->dot_product(v_normal);
+
+								if (a_front >= 0.7071) {
+									return CColor(0.0, 1.0, 0.0);
+								}
+								else if (a_front <= -0.7071) {
+									return CColor(0.0, 0.5, 0.0);
+								}
+								else {
+									float a_side = (float)v_axis_side->dot_product(v_normal);
+
+									if (a_side >= 0.7071) {
+										return CColor(0.0, 0.0, 1.0);
+									}
+									else if (a_side <= -0.7071) {
+										return CColor(0.0, 0.0, 0.5);
+									}
+								}
+							}
+
+							return CColor(0.2, 0.2, 0.2);
+						}
+
+						return kc;
 					}
 				}
 			}
+
+			// Calculate distance to block edges
+			float nx = 1.0 - (abs(cos(_yaw)) * n) % 1.0;
+			float ny = 1.0 - (abs(sin(_pitch)) * n) % 1.0;
+			float nz = 1.0 - (abs(sin(_yaw)) * n) % 1.0;
+
+			float nv = min(nx, ny, nz) + 0.001;
+			//write("nv=%f, nx=%f, ny=%f, nz=%f\n", nv, nx, ny, nz);
+
+			n += nv;
 		}
 	}
 }
