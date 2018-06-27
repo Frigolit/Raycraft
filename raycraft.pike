@@ -46,10 +46,12 @@ int main(int argc, array argv) {
 	float cam_init_x = (float)Getopt.find_option(argv, "x", "", UNDEFINED, "0.0");
 	float cam_init_y = (float)Getopt.find_option(argv, "y", "", UNDEFINED, "100.0");
 	float cam_init_z = (float)Getopt.find_option(argv, "z", "", UNDEFINED, "0.0");
-	float cam_init_yaw = (float)Getopt.find_option(argv, "", "yaw", UNDEFINED, "0.0");
-	float cam_init_pitch = (float)Getopt.find_option(argv, "", "pitch", UNDEFINED, "0.0");
+	float cam_init_yaw = (float)Getopt.find_option(argv, "", "yaw", UNDEFINED, "0.0") + 90.0;
+	float cam_init_pitch = (float)Getopt.find_option(argv, "", "pitch", UNDEFINED, "0.0") - 45.0;
 	float cam_init_fov = (float)Getopt.find_option(argv, "f", "fov", UNDEFINED, "75.0");
 
+	int enable_preview = (int)Getopt.find_option(argv, "p");
+	string outfile = Getopt.find_option(argv, "o", "", UNDEFINED, "");
 	int multiproc = (int)Getopt.find_option(argv, "m", "", UNDEFINED, "1");
 	int is_renderer = Getopt.find_option(argv, "", "renderer");
 
@@ -64,6 +66,8 @@ int main(int argc, array argv) {
 		werror("Usage: %s [options] <world path>\n", basename(argv[0]));
 		werror("\n");
 
+		werror("-p|--preview      Enable preview (SDL).\n");
+		werror("-o FILENAME       Saves the image to the specified file (supports PNG (default), JPEG and GIF).\n");
 		werror("-a|--antialias    Enable anti-aliasing.\n");
 		werror("-w|--width=N      Sets the width of the render.\n");
 		werror("-h|--height=N     Sets the height of the render.\n");
@@ -73,10 +77,8 @@ int main(int argc, array argv) {
 		werror("--yaw=N           Sets the yaw rotation of the camera.\n");
 		werror("--pitch=N         Sets the pitch rotation of the camera.\n");
 		werror("-f|--fov=N        Sets the FOV of the camera (default: 75.0).\n");
-		werror("-m=N              Enables multi-processing with N worker processes.\n");
-		werror("\n");
+		werror("-m N              Enables multi-processing with N worker processes.\n");
 
-		werror("If an \"export\" folder exists, the rendered frames will be saved to it.\n");
 		return 1;
 	}
 
@@ -143,10 +145,12 @@ int main(int argc, array argv) {
 		}
 	}
 	else {
-		// Initialize SDL
-		SDL.init(SDL.INIT_VIDEO);
-		SDL.set_caption("Raycraft", "");
-		screen = SDL.set_video_mode(width, height, 32, SDL.HWSURFACE | SDL.DOUBLEBUF | SDL.HWACCEL | SDL.RLEACCEL);
+		if (enable_preview) {
+			// Initialize SDL
+			SDL.init(SDL.INIT_VIDEO);
+			SDL.set_caption("Raycraft", "");
+			screen = SDL.set_video_mode(width, height, 32, SDL.HWSURFACE | SDL.DOUBLEBUF | SDL.HWACCEL | SDL.RLEACCEL);
+		}
 
 		// Initialize camera
 		CCamera cam = CCamera(cam_init_x, cam_init_y, cam_init_z, cam_init_yaw, cam_init_pitch);
@@ -185,7 +189,7 @@ int main(int argc, array argv) {
 					cb_tile_done(x, y, tile);
 
 					if (++tiles_done == tiles) {
-						write("Rendering completed - Releasing lock...\n");
+						// Rendering completed
 						destruct(k);
 					}
 				};
@@ -236,37 +240,40 @@ int main(int argc, array argv) {
 		Thread.Thread(
 			lambda() {
 				Image.Image img = Image.Image(width, height, 0, 0, 0);
-				Image.Image img_preview = Image.Image(width / 8, height / 8, 0, 0, 0);
 
-				// Render preview
-				render(
-					width / 8,
-					height / 8,
-					false,
-					lambda(int x, int y) {
-						img_preview->box(x * BLOCKSIZE, y * BLOCKSIZE, (x + 1) * BLOCKSIZE - 1, (y + 1) * BLOCKSIZE - 1, 255, 0, 0);
-						img->paste(img_preview->scale(width, height), 0, 0);
+				if (enable_preview) {
+					Image.Image img_preview = Image.Image(width / 8, height / 8, 0, 0, 0);
 
-						object k = mtx->lock(1);
-						SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
-						destruct(k);
-					},
-					lambda(int x, int y, Image.Image tile) {
-						img_preview->paste(tile, x * BLOCKSIZE, y * BLOCKSIZE);
-						img->paste(img_preview->scale(width, height), 0, 0);
+					// Render preview
+					render(
+						width / 8,
+						height / 8,
+						false,
+						lambda(int x, int y) {
+							img_preview->box(x * BLOCKSIZE, y * BLOCKSIZE, (x + 1) * BLOCKSIZE - 1, (y + 1) * BLOCKSIZE - 1, 255, 0, 0);
+							img->paste(img_preview->scale(width, height), 0, 0);
 
-						object k = mtx->lock(1);
-						SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
-						destruct(k);
-					}
-				);
+							object k = mtx->lock(1);
+							SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
+							destruct(k);
+						},
+						lambda(int x, int y, Image.Image tile) {
+							img_preview->paste(tile, x * BLOCKSIZE, y * BLOCKSIZE);
+							img->paste(img_preview->scale(width, height), 0, 0);
 
-				// Darken preview
-				img->paste((img_preview * 0.5)->scale(width, height), 0, 0);
+							object k = mtx->lock(1);
+							SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
+							destruct(k);
+						}
+					);
 
-				object k = mtx->lock(1);
-				SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
-				destruct(k);
+					// Darken preview
+					img->paste((img_preview * 0.5)->scale(width, height), 0, 0);
+
+					object k = mtx->lock(1);
+					SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
+					destruct(k);
+				}
 
 				// Start main render
 				render(
@@ -279,29 +286,51 @@ int main(int argc, array argv) {
 					lambda(int x, int y, Image.Image tile) {
 						img->paste(tile, x * BLOCKSIZE, y * BLOCKSIZE);
 
-						object k = mtx->lock(1);
-						SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
-						destruct(k);
+						if (enable_preview) {
+							object k = mtx->lock(1);
+							SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
+							destruct(k);
+						}
 					}
 				);
+
+				// Write to file (if specified)
+				if (outfile != "") {
+					if (glob("*.jpg", lower_case(outfile))) {
+						Stdio.write_file(outfile, Image.JPEG.encode(img, ([ "quality": 100 ])));
+					}
+					else if (glob("*.gif", lower_case(outfile))) {
+						Stdio.write_file(outfile, Image.GIF.encode(img));
+					}
+					else {
+						Stdio.write_file(outfile, Image.PNG.encode(img));
+					}
+				}
+
+				exit(0);
 			}
 		);
 
-		SDL.Event e = SDL.Event();
-		while (true) {
-			while (e->get()) {
-				if (e->type == SDL.QUIT) return 0;
+		if (enable_preview) {
+			SDL.Event e = SDL.Event();
+			while (true) {
+				while (e->get()) {
+					if (e->type == SDL.QUIT) return 0;
+				}
+
+				object k = mtx->lock(1);
+				SDL.flip();
+				destruct(k);
+
+				Pike.DefaultBackend(0.0);
+				sleep(0.1);
 			}
 
-			object k = mtx->lock(1);
-			SDL.flip();
-			destruct(k);
-
-			Pike.DefaultBackend(0.0);
-			sleep(0.1);
+			return 0;
 		}
-
-		return 0;
+		else {
+			return -1;
+		}
 	}
 }
 
