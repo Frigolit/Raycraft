@@ -21,6 +21,8 @@ mapping colors = ([
 	156: CColor(0.9, 0.9, 0.9),
 ]);
 
+mapping textures = ([ ]);
+
 CColor black = CColor(0.0, 0.0, 0.0);
 
 SDL.Surface screen;
@@ -94,7 +96,7 @@ int main(int argc, array argv) {
 		Image.Image img = Image.Image(width, height, 0, 0, 0);
 
 		// Move camera
-		cam->position->y += 1.0;
+		//cam->position->y += 1.0;
 		//cam->yaw += 4.0;
 
 		cam->start_render_async(
@@ -149,11 +151,16 @@ void load_colors() {
 			int x = c[1];
 			int y = c[2];
 
-			array d = img->copy(x * 16, y * 16, x * 16 + 15, y * 16 + 15)->average();
+			Image.Image tile = img->copy(x * 16, y * 16, x * 16 + 15, y * 16 + 15);
+			array d = tile->average();
 
 			colors[c[0]] = CColor(d[0] / 255.0, d[1] / 255.0, d[2] / 255.0);
+			textures[c[0]] = tile;
 		}
 	}
+
+	textures[2] = textures[2] * ({ 32, 180, 32 });
+	textures[18] = textures[18] * ({ 16, 128, 16 });
 }
 
 string nicehrtime(int t) {
@@ -276,44 +283,40 @@ class CCamera {
 			img = img->clear(0, 0, 0);
 
 			float fv = fov  * 0.0174532925;
-			float spx = 0.2 / (float)width;
-			float spy = 0.2 / (float)height;
 			int ix, y, x;
 
 			float ry, rx, fx, fy;
 			float r, g, b;
-			CColor c, c1, c2, c3, c4;
+			CColor c;
 
 			if (antialias) {
-				// Anti-aliased, get colors from 5 points
+				// Anti-aliased, get colors from 10 points
 
-				for (int iy = 0; iy < tileh; iy++){
+				for (int iy = 0; iy < tileh; iy++) {
 					y = iy + (tiley * blocksize);
 
 					for (ix = 0; ix < tilew; ix++) {
 						x = ix + (tilex * blocksize);
 
-						ry = ((float)y / (float)height) - 0.5;
-						rx = ((float)x / (float)width) - 0.5;
+						array ca = ({ });
 
-						fx = rx * fv;
-						fy = ry * fv;
+						for (float ify = -0.2; ify <= 0.2; ify += 0.05) {
+							for (float ifx = -0.2; ifx <= 0.2; ifx += 0.05) {
+								rx = ((x + ifx) / (float)width) - 0.5;
+								fx = rx * fv;
 
-						c = raytrace(rx, ry, fx, fy) || black;
-						/*
-						c1 = raytrace(rx, ry, (rx - 0.5 - spx) * fv, (ry - 0.5) * fv) || black;
-						c2 = raytrace(rx, ry, (rx - 0.5 + spx) * fv, (ry - 0.5) * fv) || black;
-						c3 = raytrace(rx, ry, (rx - 0.5) * fv, (ry - 0.5 - spy) * fv) || black;
-						c4 = raytrace(rx, ry, (rx - 0.5) * fv, (ry - 0.5 + spy) * fv) || black;
-						*/
-						c1 = raytrace(rx, ry, (rx - spx) * fv, fy) || black;
-						c2 = raytrace(rx, ry, (rx + spx) * fv, fy) || black;
-						c3 = raytrace(rx, ry, fx, (ry - spy) * fv) || black;
-						c4 = raytrace(rx, ry, fx, (ry + spy) * fv) || black;
+								ry = ((y + ify) / (float)height) - 0.5;
+								fy = ry * fv;
 
-						r = (c->r + c1->r + c2->r + c3->r + c4->r) / 5.0;
-						g = (c->g + c1->g + c2->g + c3->g + c4->g) / 5.0;
-						b = (c->b + c1->b + c2->b + c3->b + c4->b) / 5.0;
+								ca += ({ raytrace(rx, ry, fx, fy) || black });
+							}
+						}
+
+						float s = (float)sizeof(ca);
+
+						r = Array.sum(ca->r) / s;
+						g = Array.sum(ca->g) / s;
+						b = Array.sum(ca->b) / s;
 
 						img->setpixel(ix, iy, (int)(r * 255), (int)(g * 255), (int)(b * 255));
 					}
@@ -372,10 +375,10 @@ class CCamera {
 		Math.Matrix v_axis_front = Math.Matrix(({ 1.0, 0.0, 0.0 }));
 		Math.Matrix v_axis_side = Math.Matrix(({ 0.0, 0.0, 1.0 }));
 
-		float n = 0.0;
-		while (n < 1024.0) {
-			//n += 0.1;
+		float u, v;
 
+		float n = 0.0;
+		while (n < 4096.0) {
 			fx = position->x + cos(_yaw) * n;
 			fy = position->y + sin(_pitch) * n;
 			fz = position->z + sin(_yaw) * n;
@@ -408,53 +411,42 @@ class CCamera {
 						ky = ay;
 						kz = az;
 
-						kc = colors[b];
-
 						float bxf = fx % 1.0;
 						float byf = fy % 1.0;
 						float bzf = fz % 1.0;
 
+						/*
 						if (byf > 0.99 && ((bxf < 0.01 || bxf > 0.99) || (bzf < 0.01 || bzf > 0.99))) {
 							return CColor(0.0, 0.0, 0.0);
 						}
+						*/
 
-						if (b == 1) {
-							Math.Matrix v_hit = Math.Matrix(({ bxf, byf, bzf }));
-							Math.Matrix v_normal = v_hit->sub(v_center)->normv();
-
-							float a_top = (float)v_axis_top->dot_product(v_normal);
-
-							if (a_top >= 0.5) {
-								return CColor(1.0, 0.0, 0.0);
+						if (textures[b]) {
+							if (bxf <= 0.001 || bxf >= 0.999) {
+								u = bzf;
+								v = byf;
 							}
-							else if (a_top <= -0.7071) {
-								return CColor(0.5, 0.0, 0.0);
+							else if (byf <= 0.001 || byf >= 0.999) {
+								u = bxf;
+								v = bzf;
 							}
 							else {
-								float a_front = (float)v_axis_front->dot_product(v_normal);
-
-								if (a_front >= 0.7071) {
-									return CColor(0.0, 1.0, 0.0);
-								}
-								else if (a_front <= -0.7071) {
-									return CColor(0.0, 0.5, 0.0);
-								}
-								else {
-									float a_side = (float)v_axis_side->dot_product(v_normal);
-
-									if (a_side >= 0.7071) {
-										return CColor(0.0, 0.0, 1.0);
-									}
-									else if (a_side <= -0.7071) {
-										return CColor(0.0, 0.0, 0.5);
-									}
-								}
+								u = bxf;
+								v = byf;
 							}
 
-							return CColor(0.2, 0.2, 0.2);
-						}
+							array tc = textures[b]->getpixel((int)(u * 16), (int)(v * 16));
 
-						return kc;
+							if (u <= 0.01 || u >= 0.99 || v <= 0.01 || v >= 0.99) {
+								return CColor(tc[0] / 512.0, tc[1] / 512.0, tc[2] / 512.0);
+							}
+							else {
+								return CColor(tc[0] / 255.0, tc[1] / 255.0, tc[2] / 255.0);
+							}
+						}
+						else {
+							return colors[b];
+						}
 					}
 				}
 			}
@@ -465,7 +457,6 @@ class CCamera {
 			float nz = 1.0 - (abs(sin(_yaw)) * n) % 1.0;
 
 			float nv = min(nx, ny, nz) + 0.001;
-			//write("nv=%f, nx=%f, ny=%f, nz=%f\n", nv, nx, ny, nz);
 
 			n += nv;
 		}
