@@ -12,7 +12,11 @@ class MCChunk {
 	int(0..1) modified;
 	int(0..1) loaded;
 
-	mapping(int:System.Memory) sections;
+	mapping(int:System.Memory) section_blocks;
+	mapping(int:System.Memory) section_add;
+	mapping(int:System.Memory) section_data;
+	mapping(int:System.Memory) section_light;
+	mapping(int:System.Memory) section_skylight;
 
 	NBT_Tag nbt;
 
@@ -59,13 +63,38 @@ class MCChunk {
 
 		heightmap = level->get_child("HeightMap")->values / 16;
 
-		sections = ([ ]);
+		System.Memory m;
+		section_blocks = ([ ]);
+		section_add = ([ ]);
+		section_data = ([ ]);
+		section_light = ([ ]);
+		section_skylight = ([ ]);
+
 		foreach (level->get_child("Sections")->children, object o) {
-			System.Memory m = System.Memory(16 * 16 * 16);
+			int y = o->get_child("Y")->value;
+
+			section_blocks[y] = m = System.Memory(4096);
 			m->pwrite(0, (string)o->get_child("Blocks")->values);
 
-			int y = o->get_child("Y")->value;
-			sections[y] = m;
+			if (o->get_child("Add")) {
+				section_add[y] = m = System.Memory(2048);
+				m->pwrite(0, (string)o->get_child("Add")->values);
+			}
+
+			if (o->get_child("Data")) {
+				section_data[y] = m = System.Memory(2048);
+				m->pwrite(0, (string)o->get_child("Data")->values);
+			}
+
+			if (o->get_child("BlockLight")) {
+				section_light[y] = m = System.Memory(2048);
+				m->pwrite(0, (string)o->get_child("BlockLight")->values);
+			}
+
+			if (o->get_child("SkyLight")) {
+				section_skylight[y] = m = System.Memory(2048);
+				m->pwrite(0, (string)o->get_child("SkyLight")->values);
+			}
 		}
 
 		//cache_save();
@@ -92,12 +121,26 @@ class MCChunk {
 		Stdio.write_file(cache_path, Standards.JSON.encode(m));
 	}
 
-	int get_block(int x, int y, int z) {
+	mapping get_block(int x, int y, int z) {
 		int s = (y >> 4);
 		y &= 15;
 
-		if (!sections[s]) return 0;
+		if (!section_blocks[s]) {
+			return UNDEFINED;
+		}
 
-		return sections[s][y*16*16 + z*16 + x];
+		int n = y*16*16 + z*16 + x;
+		int id = section_blocks[s][n] | (section_add[s] ? ((section_add[s][n / 2] >> ((n % 2) << 2)) & 0x0F) : 0);
+
+		if (!id) {
+			return UNDEFINED;
+		}
+
+		return ([
+			"id": id,
+			"data": ((section_data[s][n / 2] >> ((n % 2) * 4)) & 0x0F) || 0,
+			"light": section_light[s] ? (section_light[s][n / 2] >> ((n % 2) << 2)) & 0x0F : UNDEFINED,
+			"skylight": section_skylight[s] ? (section_skylight[s][n / 2] >> ((n % 2) << 2)) & 0x0F : UNDEFINED,
+		]);
 	}
 }

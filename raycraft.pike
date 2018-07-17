@@ -5,25 +5,14 @@
 #include "src/nbt.pike"
 #include "src/world.pike"
 
+#include "src/blockmodel.pike"
+
 #define BLOCKSIZE 32
 
-// Some standard built-in block colors
-mapping colors = ([
-	1:  CColor(0.3, 0.3, 0.3),
-	2:  CColor(0.2, 0.7, 0.2),
-	3:  CColor(0.5, 0.2, 0.0),
-	4:  CColor(0.4, 0.4, 0.4),
-	8:  CColor(0.1, 0.3, 0.75),
-	9:  CColor(0.1, 0.3, 0.75),
-	17: CColor(0.7, 0.6, 0.25),
-	18: CColor(0.0, 0.4, 0.0),
-	155: CColor(0.9, 0.9, 0.9),
-	156: CColor(0.9, 0.9, 0.9),
-]);
+#define OPTIMIZE_STEPS
 
-mapping textures = ([ ]);
-
-CColor black = CColor(0.0, 0.0, 0.0);
+mapping models = ([ ]);
+BlockModel default_model;
 
 SDL.Surface screen;
 MCWorld world;
@@ -84,17 +73,26 @@ int main(int argc, array argv) {
 
 	world_path = argv[1];
 
-	for (int i = 1; i < 256; i++) {
-		if (!colors[i]) {
-			colors[i] = CColor(1.0, 0.0, 1.0);
-		}
-	}
-
 	// Load world
 	world = MCWorld(argv[1]);
 
-	// Load colors
-	load_colors();
+	// Load block data
+	load_blocks();
+
+	// Create fallback texture
+	Image.Image texture_fallback = Image.Image(4, 4, 0, 0, 0);
+	texture_fallback->setpixel(0, 0, 255, 255, 255);
+	texture_fallback->setpixel(2, 0, 255, 255, 255);
+	texture_fallback->setpixel(1, 1, 255, 255, 255);
+	texture_fallback->setpixel(3, 1, 255, 255, 255);
+	texture_fallback->setpixel(0, 2, 255, 255, 255);
+	texture_fallback->setpixel(2, 2, 255, 255, 255);
+	texture_fallback->setpixel(1, 3, 255, 255, 255);
+	texture_fallback->setpixel(3, 3, 255, 255, 255);
+	texture_fallback = texture_fallback->bitscale(16, 16);
+
+	default_model = BlockModel();
+	default_model->texture = texture_fallback;
 
 	if (is_renderer) {
 		werror("[Renderer] Process started\n");
@@ -307,7 +305,9 @@ int main(int argc, array argv) {
 					}
 				}
 
-				exit(0);
+				if (!enable_preview) {
+					exit(0);
+				}
 			}
 		);
 
@@ -334,28 +334,30 @@ int main(int argc, array argv) {
 	}
 }
 
-// Load average colors for blocks.lst and blocks.png
-void load_colors() {
-	Image.Image img = Image.PNG.decode(Stdio.read_file("data/blocks.png"));
-
+// Load block data
+void load_blocks() {
 	array a = Stdio.read_file("data/blocks.lst") / "\n";
 	foreach (a, string b) {
-		if (glob("*,*,*", b)) {
-			array c = array_sscanf(b, "%d,%d,%d");
+		if (glob("*,*", b)) {
+			array c = b / ",";
+			array d = c[0] / ":";
 
-			int x = c[1];
-			int y = c[2];
+			string name = c[1];
+			int id = (int)d[0];
+			int var = (sizeof(d) >= 2 ? (int)d[1] : 0);
 
-			Image.Image tile = img->copy(x * 16, y * 16, x * 16 + 15, y * 16 + 15);
-			array d = tile->average();
+			string path = "data/blocks/" + name + ".json";
 
-			colors[c[0]] = CColor(d[0] / 255.0, d[1] / 255.0, d[2] / 255.0);
-			textures[c[0]] = tile;
+			if (Stdio.is_file(path)) {
+				BlockModel m = BlockModel();
+				m->set_data(Standards.JSON.decode(Stdio.read_file(path)));
+				models[(id << 4) | var] = m;
+			}
+			else {
+				werror("WARNING: Missing block file %O for ID %d\n", path, id);
+			}
 		}
 	}
-
-	textures[2] = textures[2] * ({ 32, 180, 32 });
-	textures[18] = textures[18] * ({ 16, 128, 16 });
 }
 
 string nicehrtime(int t) {
@@ -396,9 +398,11 @@ class CCamera {
 				// Anti-aliased, get colors from multiple points
 
 				for (int iy = 0; iy < tileh; iy++) {
+					// Calculate screen Y-coordinate
 					y = iy + (tiley * blocksize);
 
 					for (ix = 0; ix < tilew; ix++) {
+						// Calculate screen X-coordinate
 						x = ix + (tilex * blocksize);
 
 						array ca = ({ });
@@ -411,7 +415,7 @@ class CCamera {
 								rx = ((x + ifx) / (float)width) - 0.5;
 								fx = rx * fv;
 
-								ca += ({ raytrace(rx, ry, fx, fy) || black });
+								ca += ({ raytrace(rx, ry, fx, fy) });
 							}
 						}
 
@@ -440,7 +444,7 @@ class CCamera {
 						fx = rx * fv;
 						fy = ry * fv;
 
-						c = raytrace(rx, ry, fx, fy) || black;
+						c = raytrace(rx, ry, fx, fy);
 
 						img->setpixel(ix, iy, (int)(c->r * 255), (int)(c->g * 255), (int)(c->b * 255));
 					}
@@ -460,14 +464,13 @@ class CCamera {
 		int kx = 0;
 		int ky = 0;
 		int kz = 0;
-		CColor kc = black;
+		CColor kc = UNDEFINED;
 
-		float fx, fy, fz;	// Absolute coordinates
 		int ax, ay, az;	// Absolute block coordinates
 		int bx, by, bz;	// Block coordinates within chunk (16x128x16)
 		int cx, cy, cz;	// Chunk coordinates within world
 
-		int b;
+		mapping b;
 
 		float _yaw = yaw * 0.0174532925 + ryaw;
 		float _pitch = pitch * 0.0174532925 - rpitch;
@@ -480,11 +483,31 @@ class CCamera {
 
 		float u, v;
 
-		float n = 0.0;
-		while (n < 4096.0) {
+		// Absolute coordinates - Starting point (TODO: Calculate along plane to apply camera sensor/film size)
+		float fx = position->x;
+		float fy = position->y;
+		float fz = position->z;
+
+		float tn = 0.0;
+
+		while (true) {
+			/*
 			fx = position->x + cos(_yaw) * n;
 			fy = position->y + sin(_pitch) * n;
 			fz = position->z + sin(_yaw) * n;
+			*/
+
+			/*
+			fx = fx + (n * sin(_pitch) * cos(_yaw));
+			fy = fy + (n * sin(_pitch) * sin(_yaw));
+			fz = fz + (n * cos(_pitch));
+			*/
+
+			/*
+			fx += n * cos(_pitch) * cos(_yaw);
+			fy += n * sin(_pitch);
+			fz += n * cos(_pitch) * sin(-_yaw);
+			*/
 
 			ax = (int)fx;
 			ay = (int)fy;
@@ -498,7 +521,7 @@ class CCamera {
 			cy = ay >> 7;
 			cz = az >> 4;
 
-			if (!cy) {
+			if (cy == 0 || cy == 1) {
 				MCChunk chunk = chunk_cache[cx + "," + cz];
 				if (!chunk) {
 					chunk = world->get_chunk(cx, cz);
@@ -517,59 +540,116 @@ class CCamera {
 						float byf = fy % 1.0;
 						float bzf = fz % 1.0;
 
-						if (textures[b]) {
-							if (bxf <= 0.001 || bxf >= 0.999) {
-								u = bzf;
-								v = byf;
-							}
-							else if (byf <= 0.001 || byf >= 0.999) {
-								u = bxf;
-								v = bzf;
-							}
-							else {
-								u = bxf;
-								v = byf;
-							}
+						BlockModel model = models[(b->id << 4) | b->data] || models[b->id << 4] || default_model;
 
-							array tc = textures[b]->getpixel((int)(u * 16), (int)(v * 16));
+						array tc;
+						string side = "any";
 
-							if (u <= 0.01 || u >= 0.99 || v <= 0.01 || v >= 0.99) {
-								kc = CColor(tc[0] / 512.0, tc[1] / 512.0, tc[2] / 512.0);
-							}
-							else {
-								kc = CColor(tc[0] / 255.0, tc[1] / 255.0, tc[2] / 255.0);
-							}
+						if (bxf <= 0.001 || bxf >= 0.999) {
+							u = bzf;
+							v = 1.0 - byf;
+							side = "front";
+						}
+						else if (byf <= 0.001 || byf >= 0.999) {
+							u = bxf;
+							v = bzf;
+							side = "top";
 						}
 						else {
-							kc = colors[b];
+							u = bxf;
+							v = 1.0 - byf;
+							side = "left";
 						}
+
+						if (!model->textures[side] && !model->texture) {
+							tc = ({ (int)(u * 255.0), 0, (int)(v * 255.0) });
+						}
+						else {
+							tc = (model->textures[side] || model->texture)->getpixel((int)(u * 16), (int)(v * 16));
+						}
+
+						if (side == "top") {
+							kc = CColor(tc[0] / 255.0, tc[1] / 255.0, tc[2] / 255.0);
+						}
+						else {
+							kc = CColor(tc[0] / 280.0, tc[1] / 280.0, tc[2] / 280.0);
+						}
+
+						/*
+						float l = (b->skylight / 15.0);
+						kc->r *= l;
+						kc->g *= l;
+						kc->b *= l;
+						*/
 
 						break;
 					}
 				}
 			}
 
-			// Calculate distance to block edges
-			float nx = 1.0 - (abs(cos(_yaw)) * n) % 1.0;
-			float ny = 1.0 - (abs(sin(_pitch)) * n) % 1.0;
-			float nz = 1.0 - (abs(sin(_yaw)) * n) % 1.0;
+			// Calculate step length
 
-			float nv = min(nx, ny, nz) + 0.001;
+			#ifdef OPTIMIZE_STEPS
+				float n;
+				float s_x, s_y, s_z;
 
-			n += nv;
+				if (cos(_yaw) < 0.0) {
+					s_x = abs((fx % 1.0) / cos(_yaw));
+				}
+				else {
+					s_x = abs((1.0 - (fx % 1.0)) / cos(_yaw));
+				}
+
+				if (sin(_pitch) < 0.0) {
+					s_y = abs((fy % 1.0) / sin(_pitch));
+				}
+				else {
+					s_y = abs((1.0 - (fy % 1.0)) / sin(_pitch));
+				}
+
+				if (sin(_yaw) < 0.0) {
+					s_z = abs((fz % 1.0) / sin(_yaw));
+				}
+				else {
+					s_z = abs((1.0 - (fz % 1.0)) / sin(_yaw));
+				}
+
+				n = min(s_x, s_y, s_z);
+
+				if (n < 0.00001) {
+					n = 0.00001;
+				}
+			#else
+				float n = 0.001;
+			#endif
+
+			tn += n;
+
+			// Step ray
+			fx += n * cos(_yaw);
+			fy += n * sin(_pitch);
+			fz += n * sin(_yaw);
+
+			if (tn >= 4096.0) {
+				return CColor(1.0, 0.0, 0.0);
+			}
 		}
 
-		return CColor(linear(kc->r, 0.8, n / 4096.0), linear(kc->g, 0.941, n / 4096.0), linear(kc->b, 1.0, n / 4096.0));
+		//float np = n / 4096.0;
+		float np = 0.0;
+		return CColor(linear(kc->r, 0.8, np), linear(kc->g, 0.941, np), linear(kc->b, 1.0, np));
+		//return CColor(tn / 32.0, tn / 32.0, tn / 32.0);
 	}
 }
 
 class CColor {
-	float r, g, b;
+	float r, g, b, a;
 
-	void create(float _r, float _g, float _b) {
+	void create(float _r, float _g, float _b, float|void _a) {
 		r = _r;
 		g = _g;
 		b = _b;
+		a = undefinedp(_a) ? 1.0 : _a;
 	}
 }
 
