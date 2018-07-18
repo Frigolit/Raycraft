@@ -71,4 +71,43 @@ class MCWorld {
 		}
 		return r;
 	}
+
+	mapping(string:int) get_bounds() {
+		mapping r = ([ ]);
+		bool first = true;
+
+		array a = get_dir(combine_path(base_path, "region"));
+		foreach (a, string b) {
+			if (glob("r.**.*.mca", b)) {
+				int x, z;
+				sscanf(b, "r.%d.%d.mca", x, z);
+
+				x *= 512;
+				z *= 512;
+
+				if (first) {
+					first = false;
+					r->x_min = r->x_max = x;
+					r->z_min = r->z_max = z;
+				}
+				else {
+					if (x < r->x_min) {
+						r->x_min = x;
+					}
+					else if (x > r->x_max) {
+						r->x_max = x;
+					}
+
+					if (z < r->z_min) {
+						r->z_min = z;
+					}
+					else if (z > r->z_max) {
+						r->z_max = z;
+					}
+				}
+			}
+		}
+
+		return r;
+	}
 }

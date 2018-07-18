@@ -1,0 +1,5 @@
+{
+	"name": "minecraft.grass",
+	"texture": "/home/frigolit/minecraft_extracted/1.12.2/assets/minecraft/textures/blocks/grass_top.png",
+	"colour_overlay": [ 0, 200, 0 ]
+}

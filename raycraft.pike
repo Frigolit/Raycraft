@@ -9,8 +9,6 @@
 
 #define BLOCKSIZE 32
 
-#define OPTIMIZE_STEPS
-
 mapping models = ([ ]);
 BlockModel default_model;
 
@@ -18,16 +16,23 @@ SDL.Surface screen;
 MCWorld world;
 
 bool antialias = false;
+bool infinite_render = false;
 
 mapping chunk_cache = ([ ]);
+ADT.History chunk_soft_cache = ADT.History(512);
 
 string exec_path;
 string world_path;
+
+mapping bounds;
+
+CColor bg_color = CColor(221.0/255.0, 237.0/255.0, 249.0/255.0);
 
 int main(int argc, array argv) {
 	exec_path = argv[0];
 
 	antialias = Getopt.find_option(argv, "a", "antialias");
+	infinite_render = Getopt.find_option(argv, "", "infinite");
 
 	int width = (int)Getopt.find_option(argv, "w", "width", UNDEFINED, "640");
 	int height = (int)Getopt.find_option(argv, "h", "height", UNDEFINED, "360");
@@ -42,6 +47,7 @@ int main(int argc, array argv) {
 	int enable_preview = (int)Getopt.find_option(argv, "p");
 	string outfile = Getopt.find_option(argv, "o", "", UNDEFINED, "");
 	int multiproc = (int)Getopt.find_option(argv, "m", "", UNDEFINED, "1");
+
 	int is_renderer = Getopt.find_option(argv, "", "renderer");
 
 	if (multiproc < 1) {
@@ -50,6 +56,8 @@ int main(int argc, array argv) {
 
 	argv = Getopt.get_args(argv);
 	argc = sizeof(argv);
+
+	set_weak_flag(chunk_cache, Pike.WEAK_VALUES);
 
 	if (argc < 2) {
 		werror("Usage: %s [options] <world path>\n", basename(argv[0]));
@@ -75,6 +83,7 @@ int main(int argc, array argv) {
 
 	// Load world
 	world = MCWorld(argv[1]);
+	bounds = world->get_bounds();
 
 	// Load block data
 	load_blocks();
@@ -111,6 +120,7 @@ int main(int argc, array argv) {
 				cam->fov = m->camera->fov;
 
 				Image.Image tile = cam->render_tile(m->x, m->y, m->w, m->h, m->blksize, m->antialias);
+				gc();
 
 				send(([
 					"cmd": "render_result",
@@ -229,6 +239,7 @@ int main(int argc, array argv) {
 					cb_tile_start(x, y);
 
 					Image.Image tile = cam->render_tile(@b);
+					gc();
 
 					cb_tile_done(x, y, tile);
 				}
@@ -412,7 +423,7 @@ class CCamera {
 							fy = ry * fv;
 
 							for (float ifx = -0.2; ifx <= 0.2; ifx += 0.1) {
-								rx = ((x + ifx) / (float)width) - 0.5;
+								rx = ((x + ifx) / (float)height) - 0.5;
 								fx = rx * fv;
 
 								ca += ({ raytrace(rx, ry, fx, fy) });
@@ -439,7 +450,7 @@ class CCamera {
 						x = ix + (tilex * blocksize);
 
 						ry = ((float)y / (float)height) - 0.5;
-						rx = ((float)x / (float)width) - 0.5;
+						rx = ((float)x / (float)height) - 0.5;
 
 						fx = rx * fv;
 						fy = ry * fv;
@@ -490,25 +501,17 @@ class CCamera {
 
 		float tn = 0.0;
 
+		float ang_x = cos(_yaw);
+		float ang_y = sin(_pitch);
+		float ang_z = sin(_yaw);
+
+		int dir_x = sgn(cos(_yaw));
+		int dir_y = sgn(sin(_pitch));
+		int dir_z = sgn(sin(_yaw));
+
+		int tm = time();
+
 		while (true) {
-			/*
-			fx = position->x + cos(_yaw) * n;
-			fy = position->y + sin(_pitch) * n;
-			fz = position->z + sin(_yaw) * n;
-			*/
-
-			/*
-			fx = fx + (n * sin(_pitch) * cos(_yaw));
-			fy = fy + (n * sin(_pitch) * sin(_yaw));
-			fz = fz + (n * cos(_pitch));
-			*/
-
-			/*
-			fx += n * cos(_pitch) * cos(_yaw);
-			fy += n * sin(_pitch);
-			fz += n * cos(_pitch) * sin(-_yaw);
-			*/
-
 			ax = (int)fx;
 			ay = (int)fy;
 			az = (int)fz;
@@ -521,15 +524,17 @@ class CCamera {
 			cy = ay >> 7;
 			cz = az >> 4;
 
+			// 2 vertical chunks = 256 blocks world height
 			if (cy == 0 || cy == 1) {
 				MCChunk chunk = chunk_cache[cx + "," + cz];
 				if (!chunk) {
 					chunk = world->get_chunk(cx, cz);
 					chunk_cache[cx + "," + cz] = chunk;
+					chunk_soft_cache->push(chunk);
 				}
 
 				if (chunk) {
-					b = chunk->get_block(bx, by, bz);
+					b = chunk->get_block(bx, by | (cy << 7), bz);
 
 					if (b) {
 						kx = ax;
@@ -572,7 +577,7 @@ class CCamera {
 							kc = CColor(tc[0] / 255.0, tc[1] / 255.0, tc[2] / 255.0);
 						}
 						else {
-							kc = CColor(tc[0] / 280.0, tc[1] / 280.0, tc[2] / 280.0);
+							kc = CColor(tc[0] / 320.0, tc[1] / 320.0, tc[2] / 320.0);
 						}
 
 						/*
@@ -585,53 +590,66 @@ class CCamera {
 						break;
 					}
 				}
+				else if (cx >= bounds->x_max && dir_x == 1) {
+					return bg_color;
+				}
+				else if (cx < bounds->x_min && dir_x == -1) {
+					return bg_color;
+				}
+				else if (cz >= bounds->z_max && dir_z == 1) {
+					return bg_color;
+				}
+				else if (cz < bounds->z_min && dir_z == -1) {
+					return bg_color;
+				}
+			}
+			else if (cy > 0 && dir_y == 1) {
+				return bg_color;
+			}
+			else if (cy < 0 && dir_y == -1) {
+				return bg_color;
 			}
 
 			// Calculate step length
+			float s_x = 1.0, s_y = 1.0, s_z = 1.0;
 
-			#ifdef OPTIMIZE_STEPS
-				float n;
-				float s_x, s_y, s_z;
+			if (ang_x < -0.00001) {
+				s_x = abs((fx % 1.0) / ang_x);
+			}
+			else if (ang_x > 0.00001) {
+				s_x = abs((1.0 - (fx % 1.0)) / ang_x);
+			}
 
-				if (cos(_yaw) < 0.0) {
-					s_x = abs((fx % 1.0) / cos(_yaw));
-				}
-				else {
-					s_x = abs((1.0 - (fx % 1.0)) / cos(_yaw));
-				}
+			if (ang_y < -0.00001) {
+				s_y = abs((fy % 1.0) / ang_y);
+			}
+			else if (ang_y > 0.00001) {
+				s_y = abs((1.0 - (fy % 1.0)) / ang_y);
+			}
 
-				if (sin(_pitch) < 0.0) {
-					s_y = abs((fy % 1.0) / sin(_pitch));
-				}
-				else {
-					s_y = abs((1.0 - (fy % 1.0)) / sin(_pitch));
-				}
+			if (ang_z < -0.00001) {
+				s_z = abs((fz % 1.0) / ang_z);
+			}
+			else if (ang_z > 0.00001) {
+				s_z = abs((1.0 - (fz % 1.0)) / ang_z);
+			}
 
-				if (sin(_yaw) < 0.0) {
-					s_z = abs((fz % 1.0) / sin(_yaw));
-				}
-				else {
-					s_z = abs((1.0 - (fz % 1.0)) / sin(_yaw));
-				}
+			float n = min(s_x, s_y, s_z);
 
-				n = min(s_x, s_y, s_z);
-
-				if (n < 0.00001) {
-					n = 0.00001;
-				}
-			#else
-				float n = 0.001;
-			#endif
-
-			tn += n;
+			// Sanity checking
+			if (n < 0.00001) {
+				n = 0.00001;
+			}
 
 			// Step ray
-			fx += n * cos(_yaw);
-			fy += n * sin(_pitch);
-			fz += n * sin(_yaw);
+			tn += n;
 
-			if (tn >= 4096.0) {
-				return CColor(1.0, 0.0, 0.0);
+			fx += n * ang_x;
+			fy += n * ang_y;
+			fz += n * ang_z;
+
+			if (!infinite_render && tn >= 65536.0) {
+				return bg_color;
 			}
 		}
 

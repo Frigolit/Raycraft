@@ -6,6 +6,10 @@ class BlockModel {
 
 	void set_data(mapping m) {
 		texture = Image.ANY.decode(Stdio.read_file(m->texture));
+
+		if (m->colour_overlay) {
+			texture = texture * m->colour_overlay;
+		}
 	}
 }
 
