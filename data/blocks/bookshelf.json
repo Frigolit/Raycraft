@@ -1,4 +1,9 @@
 {
 	"name": "minecraft.bookshelf",
-	"texture": "/home/frigolit/minecraft_extracted/1.12.2/assets/minecraft/textures/blocks/bookshelf.png"
+	"texture": "/home/frigolit/minecraft_extracted/1.12.2/assets/minecraft/textures/blocks/bookshelf.png",
+	"textures": {
+		"top": {
+			"filename": "/home/frigolit/minecraft_extracted/1.12.2/assets/minecraft/textures/blocks/planks_oak.png"
+		}
+	}
 }

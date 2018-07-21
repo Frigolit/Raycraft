@@ -15,8 +15,8 @@ class MCChunk {
 	mapping(int:System.Memory) section_blocks;
 	mapping(int:System.Memory) section_add;
 	mapping(int:System.Memory) section_data;
-	mapping(int:System.Memory) section_light;
-	mapping(int:System.Memory) section_skylight;
+	//mapping(int:System.Memory) section_light;
+	//mapping(int:System.Memory) section_skylight;
 
 	NBT_Tag nbt;
 
@@ -67,8 +67,8 @@ class MCChunk {
 		section_blocks = ([ ]);
 		section_add = ([ ]);
 		section_data = ([ ]);
-		section_light = ([ ]);
-		section_skylight = ([ ]);
+		//section_light = ([ ]);
+		//section_skylight = ([ ]);
 
 		foreach (level->get_child("Sections")->children, object o) {
 			int y = o->get_child("Y")->value;
@@ -86,6 +86,7 @@ class MCChunk {
 				m->pwrite(0, (string)o->get_child("Data")->values);
 			}
 
+			/*
 			if (o->get_child("BlockLight")) {
 				section_light[y] = m = System.Memory(2048);
 				m->pwrite(0, (string)o->get_child("BlockLight")->values);
@@ -95,6 +96,7 @@ class MCChunk {
 				section_skylight[y] = m = System.Memory(2048);
 				m->pwrite(0, (string)o->get_child("SkyLight")->values);
 			}
+			*/
 		}
 
 		//cache_save();
@@ -139,8 +141,8 @@ class MCChunk {
 		return ([
 			"id": id,
 			"data": ((section_data[s][n / 2] >> ((n % 2) * 4)) & 0x0F) || 0,
-			"light": section_light[s] ? (section_light[s][n / 2] >> ((n % 2) << 2)) & 0x0F : UNDEFINED,
-			"skylight": section_skylight[s] ? (section_skylight[s][n / 2] >> ((n % 2) << 2)) & 0x0F : UNDEFINED,
+			//"light": section_light[s] ? (section_light[s][n / 2] >> ((n % 2) << 2)) & 0x0F : UNDEFINED,
+			//"skylight": section_skylight[s] ? (section_skylight[s][n / 2] >> ((n % 2) << 2)) & 0x0F : UNDEFINED,
 		]);
 	}
 }

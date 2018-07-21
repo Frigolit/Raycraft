@@ -2,5 +2,6 @@
 	"name": "minecraft.leaves",
 	"variant": "oak",
 	"texture": "/home/frigolit/minecraft_extracted/1.12.2/assets/minecraft/textures/blocks/leaves_oak.png",
-	"colour_overlay": [ 0, 140, 0 ]
+	"colour_overlay": [ 0, 140, 0 ],
+	"join_blocks": false
 }

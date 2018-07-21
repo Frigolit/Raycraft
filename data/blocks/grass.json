@@ -1,5 +1,13 @@
 {
 	"name": "minecraft.grass",
 	"texture": "/home/frigolit/minecraft_extracted/1.12.2/assets/minecraft/textures/blocks/grass_top.png",
-	"colour_overlay": [ 0, 200, 0 ]
+	"textures": {
+		"sides": {
+			"filename": "/home/frigolit/minecraft_extracted/1.12.2/assets/minecraft/textures/blocks/grass_side.png"
+		},
+		"bottom": {
+			"filename": "/home/frigolit/minecraft_extracted/1.12.2/assets/minecraft/textures/blocks/dirt.png"
+		}
+	},
+	"colour_overlay": [ 64, 200, 64 ]
 }

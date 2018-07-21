@@ -16,7 +16,6 @@ SDL.Surface screen;
 MCWorld world;
 
 bool antialias = false;
-bool infinite_render = false;
 
 mapping chunk_cache = ([ ]);
 ADT.History chunk_soft_cache = ADT.History(512);
@@ -32,7 +31,6 @@ int main(int argc, array argv) {
 	exec_path = argv[0];
 
 	antialias = Getopt.find_option(argv, "a", "antialias");
-	infinite_render = Getopt.find_option(argv, "", "infinite");
 
 	int width = (int)Getopt.find_option(argv, "w", "width", UNDEFINED, "640");
 	int height = (int)Getopt.find_option(argv, "h", "height", UNDEFINED, "360");
@@ -47,6 +45,7 @@ int main(int argc, array argv) {
 	int enable_preview = (int)Getopt.find_option(argv, "p");
 	string outfile = Getopt.find_option(argv, "o", "", UNDEFINED, "");
 	int multiproc = (int)Getopt.find_option(argv, "m", "", UNDEFINED, "1");
+	bool save_image_on_update = Getopt.find_option(argv, "u");
 
 	int is_renderer = Getopt.find_option(argv, "", "renderer");
 
@@ -75,6 +74,7 @@ int main(int argc, array argv) {
 		werror("--pitch=N         Sets the pitch rotation of the camera.\n");
 		werror("-f|--fov=N        Sets the FOV of the camera (default: 75.0).\n");
 		werror("-m N              Enables multi-processing with N worker processes.\n");
+		werror("-u                When combined with -o, saves the framebuffer for every rendered tile.\n");
 
 		return 1;
 	}
@@ -101,11 +101,9 @@ int main(int argc, array argv) {
 	texture_fallback = texture_fallback->bitscale(16, 16);
 
 	default_model = BlockModel();
-	default_model->texture = texture_fallback;
+	default_model->material = Material(texture_fallback, Image.Image(255, 255, 255, 4, 4));
 
 	if (is_renderer) {
-		werror("[Renderer] Process started\n");
-
 		void send(mapping m) {
 			write(Standards.JSON.encode(m, Standards.JSON.ASCII_ONLY) + "\n");
 		};
@@ -114,8 +112,6 @@ int main(int argc, array argv) {
 			mapping m = Standards.JSON.decode(d);
 
 			if (m->cmd == "render") {
-				werror("[Renderer] Rendering tile (%d, %d)...\n", m->x, m->y);
-
 				CCamera cam = CCamera(m->camera->x, m->camera->y, m->camera->z, m->camera->yaw, m->camera->pitch);
 				cam->fov = m->camera->fov;
 
@@ -188,15 +184,23 @@ int main(int argc, array argv) {
 				Thread.Mutex _mtx = Thread.Mutex();
 				object k = _mtx->lock();
 
+				Thread.Mutex _updmtx = Thread.Mutex();
+
 				// Local callbacks
 				void _cb_tile_start(Worker worker, int x, int y) {
 					cb_tile_start(x, y);
 				};
 
 				void _cb_tile_done(Worker worker, int x, int y, Image.Image tile) {
+					object k_upd = _updmtx->lock(1);
 					cb_tile_done(x, y, tile);
 
-					if (++tiles_done == tiles) {
+					tiles_done++;
+
+					write("\r""Rendering... %.2f%%", ((float)tiles_done / (float)tiles) * 100.0);
+
+					if (tiles_done == tiles) {
+						write("\n");
 						// Rendering completed
 						destruct(k);
 					}
@@ -295,6 +299,18 @@ int main(int argc, array argv) {
 					lambda(int x, int y, Image.Image tile) {
 						img->paste(tile, x * BLOCKSIZE, y * BLOCKSIZE);
 
+						if (outfile != "" && save_image_on_update) {
+							if (glob("*.jpg", lower_case(outfile))) {
+								Stdio.write_file(outfile, Image.JPEG.encode(img, ([ "quality": 100 ])));
+							}
+							else if (glob("*.gif", lower_case(outfile))) {
+								Stdio.write_file(outfile, Image.GIF.encode(img));
+							}
+							else {
+								Stdio.write_file(outfile, Image.PNG.encode(img));
+							}
+						}
+
 						if (enable_preview) {
 							object k = mtx->lock(1);
 							SDL.Surface()->set_image(img, SDL.HWSURFACE)->display_format()->blit(screen);
@@ -365,7 +381,7 @@ void load_blocks() {
 				models[(id << 4) | var] = m;
 			}
 			else {
-				werror("WARNING: Missing block file %O for ID %d\n", path, id);
+				werror("WARNING: Missing file %O for block %d:%d\n", path, id, var);
 			}
 		}
 	}
@@ -475,7 +491,7 @@ class CCamera {
 		int kx = 0;
 		int ky = 0;
 		int kz = 0;
-		CColor kc = UNDEFINED;
+		CColor kc = CColor(0.0, 0.0, 0.0, 0.0);
 
 		int ax, ay, az;	// Absolute block coordinates
 		int bx, by, bz;	// Block coordinates within chunk (16x128x16)
@@ -510,6 +526,8 @@ class CCamera {
 		int dir_z = sgn(sin(_yaw));
 
 		int tm = time();
+
+		BlockModel last_blk_type = UNDEFINED;
 
 		while (true) {
 			ax = (int)fx;
@@ -547,47 +565,54 @@ class CCamera {
 
 						BlockModel model = models[(b->id << 4) | b->data] || models[b->id << 4] || default_model;
 
-						array tc;
-						string side = "any";
+						if (model != last_blk_type || !model->join_blocks) {
+							last_blk_type = model;
 
-						if (bxf <= 0.001 || bxf >= 0.999) {
-							u = bzf;
-							v = 1.0 - byf;
-							side = "front";
-						}
-						else if (byf <= 0.001 || byf >= 0.999) {
-							u = bxf;
-							v = bzf;
-							side = "top";
-						}
-						else {
-							u = bxf;
-							v = 1.0 - byf;
-							side = "left";
-						}
+							array tc;
+							string side = "any";
 
-						if (!model->textures[side] && !model->texture) {
-							tc = ({ (int)(u * 255.0), 0, (int)(v * 255.0) });
-						}
-						else {
-							tc = (model->textures[side] || model->texture)->getpixel((int)(u * 16), (int)(v * 16));
-						}
+							if (bxf <= 0.001 || bxf >= 0.999) {
+								u = bzf;
+								v = 1.0 - byf;
+								side = "front";
+							}
+							else if (byf <= 0.001 || byf >= 0.999) {
+								u = bxf;
+								v = bzf;
+								side = "top";
+							}
+							else {
+								u = bxf;
+								v = 1.0 - byf;
+								side = "left";
+							}
 
-						if (side == "top") {
-							kc = CColor(tc[0] / 255.0, tc[1] / 255.0, tc[2] / 255.0);
-						}
-						else {
-							kc = CColor(tc[0] / 320.0, tc[1] / 320.0, tc[2] / 320.0);
-						}
+							if (!model->materials[side] && !model->material) {
+								tc = ({ (int)(u * 255.0), 0, (int)(v * 255.0), 1.0 });
+							}
+							else {
+								tc = (model->materials[side] || model->material)->get(u, v);
+							}
 
-						/*
-						float l = (b->skylight / 15.0);
-						kc->r *= l;
-						kc->g *= l;
-						kc->b *= l;
-						*/
+							if (side != "top") {
+								tc[0] *= 0.8;
+								tc[1] *= 0.8;
+								tc[2] *= 0.8;
+							}
 
-						break;
+							float alpha = tc[3] * (1.0 - kc->a);
+							kc->r = linear(kc->r, tc[0], alpha);
+							kc->g = linear(kc->g, tc[1], alpha);
+							kc->b = linear(kc->b, tc[2], alpha);
+							kc->a += alpha;
+
+							if (kc->a >= 1.0) {
+								break;
+							}
+						}
+					}
+					else {
+						last_blk_type = UNDEFINED;
 					}
 				}
 				else if (cx >= bounds->x_max && dir_x == 1) {
@@ -647,16 +672,13 @@ class CCamera {
 			fx += n * ang_x;
 			fy += n * ang_y;
 			fz += n * ang_z;
-
-			if (!infinite_render && tn >= 65536.0) {
-				return bg_color;
-			}
 		}
 
-		//float np = n / 4096.0;
-		float np = 0.0;
-		return CColor(linear(kc->r, 0.8, np), linear(kc->g, 0.941, np), linear(kc->b, 1.0, np));
-		//return CColor(tn / 32.0, tn / 32.0, tn / 32.0);
+		return CColor(
+			linear(kc->r, 0.800, 1.0 - kc->a),
+			linear(kc->g, 0.941, 1.0 - kc->a),
+			linear(kc->b, 1.000, 1.0 - kc->a)
+		);
 	}
 }
 
